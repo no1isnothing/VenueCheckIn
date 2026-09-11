@@ -32,6 +32,7 @@ fun VenueScreen(viewModel: VenueViewModel = hiltViewModel()) {
     val isScanning by viewModel.isScanning.collectAsState()
     val currentReading by viewModel.currentReading.collectAsState()
     val log by viewModel.log.collectAsState()
+    val geofenceLog by viewModel.geofenceLog.collectAsState()
 
     val context = LocalContext.current
 
@@ -48,6 +49,21 @@ fun VenueScreen(viewModel: VenueViewModel = hiltViewModel()) {
     ) { _ ->
         if (hasAllScanPermissions()) viewModel.toggleScanning()
     }
+
+    // Geofencing only needs fine location, not BLUETOOTH_SCAN - kept as its own permission check
+    // and launcher, separate from the BLE one above, matching the "separate from beacon" ask.
+    // Background location (needed for transitions to fire reliably once the app isn't in the
+    // foreground) isn't requested here yet - planning.md §11's staged permission flow is still
+    // unbuilt; this is foreground-only manual verification for now.
+    fun hasFineLocationPermission() =
+        ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
+    val geofencePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted -> if (granted) viewModel.registerGeofences() }
+
     val timeFormatter = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
 
     Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -76,9 +92,38 @@ fun VenueScreen(viewModel: VenueViewModel = hiltViewModel()) {
                 Text(if (isScanning) "Stop Scanning" else "Start Scanning")
             }
 
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Button(
+                onClick = {
+                    if (hasFineLocationPermission()) {
+                        viewModel.registerGeofences()
+                    } else {
+                        geofencePermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                    }
+                },
+            ) {
+                Text("Register Geofences")
+            }
+
             Spacer(modifier = Modifier.height(20.dp))
 
-            Text(text = "Log", style = MaterialTheme.typography.titleMedium)
+            Text(text = "Geofence Log", style = MaterialTheme.typography.titleMedium)
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Column {
+                for (entry in geofenceLog) {
+                    Text(
+                        text = "${timeFormatter.format(Date(entry.timestampMillis))}   ${entry.message}",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            Text(text = "Beacon Log", style = MaterialTheme.typography.titleMedium)
 
             Spacer(modifier = Modifier.height(4.dp))
 

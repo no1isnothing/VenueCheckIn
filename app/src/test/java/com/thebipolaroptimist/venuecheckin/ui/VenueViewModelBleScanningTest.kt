@@ -2,6 +2,7 @@ package com.thebipolaroptimist.venuecheckin.ui
 
 import com.thebipolaroptimist.venuecheckin.data.ble.BeaconSighting
 import com.thebipolaroptimist.venuecheckin.data.venue.VenueRepository
+import com.thebipolaroptimist.venuecheckin.domain.ContainmentChecker
 import com.thebipolaroptimist.venuecheckin.domain.DEFAULT_BEACON_LOST_TIMEOUT
 import com.thebipolaroptimist.venuecheckin.domain.Proximity
 import com.thebipolaroptimist.venuecheckin.domain.VenueStateMachine
@@ -47,6 +48,7 @@ class VenueViewModelBleScanningTest {
             bleScanner = bleScanner,
             locationSource = FakeLocationSource(),
             stateMachine = VenueStateMachine(),
+            containmentChecker = ContainmentChecker(),
         )
     }
 

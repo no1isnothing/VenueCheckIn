@@ -32,22 +32,15 @@ Rationale for interfaces at the `data/` boundary: `GeofencingClient` and `Blueto
 
 ## 3. Venue & beacon identity — decision
 
-**Pick iBeacon (UUID + major + minor).** Reasons:
+**Decided: iBeacon (UUID + major + minor).** (Briefly switched to Eddystone-UID and back — see history note below.) Reasons:
+- The take-home spec names it directly as the first example format ("an iBeacon UUID + major + minor, or a service UUID, or a local name"), which settles it over a functionally-comparable alternative.
 - Every simulation option listed in the prompt (Beacon Simulator, Beacon Toy, nRF Connect advertiser) supports iBeacon out of the box; Eddystone/service-UUID support is spottier across those apps.
 - The manual-parse requirement is well-documented and bounded: Apple manufacturer ID `0x004C`, iBeacon sub-type `0x02`, length `0x15` (21), then 16-byte UUID, 2-byte major, 2-byte minor, 1-byte signed calibrated Tx power — all inside `ScanRecord.getManufacturerSpecificData(0x004C)`.
 - One venue = one UUID, distinguished by major (or minor) per venue, so the "venue's beacon" mapping is just a lookup table, no dynamic pairing needed.
 
 Document in README exactly which simulator app + UUID/major/minor per venue.
 
-**Addendum — Eddystone-UID, given Beacon Simulator specifically:** revisited since Beacon Simulator (Vincent Hiribarren's app) broadcasts both cleanly, so the "simulator support is spottier" reason above is neutral if that's the fixed choice of simulator app.
-
-*Format:* Eddystone-UID advertises the standard Eddystone service UUID `0xFEAA` via AD type `0x16` (Service Data – 16-bit UUID), payload = frame type byte (`0x00` for UID) + 1-byte ranging (Tx power) + 10-byte Namespace + 6-byte Instance + 2 reserved bytes. Structurally parallel to iBeacon's UUID/major/minor: Namespace ≈ venue identity, Instance ≈ specific beacon unit.
-
-*Filtering difference:* this is the practical part of the question. iBeacon has no dedicated Android filter concept — you build a `ScanFilter` via `setManufacturerData(0x004C, prefixBytes, maskBytes)`, matching subtype+length+UUID and masking off major/minor/Tx power. Eddystone gets a first-class filter dimension instead: `ScanFilter.setServiceUuid(ParcelUuid of 0xFEAA)`, which is arguably the "intended" axis of Android's `ScanFilter` API (it indexes by service UUID at the radio/HCI level rather than the blunter "all packets from this manufacturer ID" match). For per-venue specificity you'd still layer `setServiceData(EDDYSTONE_UUID, prefixBytes, maskBytes)` on top — same prefix+mask mechanics as iBeacon, just against service data instead of manufacturer data, matching frame-type + Namespace and masking off ranging/Instance/reserved.
-
-*Wrinkle unique to Eddystone:* a single beacon (real or simulated) can interleave multiple frame types — UID (identity), URL, and TLM (telemetry: battery/temp, carries no ID) — all sharing the same `0xFEAA` service UUID, distinguished only by the first byte of service data. Filtering on service UUID alone lets URL/TLM frames through to the callback too, so the frame-type byte needs checking regardless — cheapest to bake `0x00` (UID) straight into the `ScanFilter`'s prefix/mask so only identity frames ever reach the callback, rather than discriminating in Kotlin after the fact. Beacon Simulator makes TLM a separate toggle from UID, so this is avoidable for *this* simulated beacon by just not enabling TLM — but the requirement asks for handling the advertisement payload robustly, and the filter-level guard costs nothing extra, so it's worth doing regardless of whether TLM ever actually gets toggled on. iBeacon has no equivalent — every iBeacon packet is self-contained, no sibling frame type to exclude.
-
-*Net:* roughly a wash on implementation cost — both need a prefix+mask `ScanFilter` and both map cleanly onto "one venue = one identity." Eddystone's `setServiceUuid` is a marginally cleaner top-level filter and its frame-type wrinkle is arguably a better demonstration of "handling the advertisement payload directly" (the exact thing requirement 9's parsing ask is testing), at the cost of one more edge case to reason about and test. **Still recommending iBeacon** (unchanged) mainly for inertia — it's the more commonly-referenced format for "parse this by hand" exercises and has one fewer moving part (no sibling frame types to exclude) — but Eddystone-UID is a fully legitimate alternative if there's a preference for the service-UUID filtering story or the extra frame-type-handling detail for the conversation on the call.
+*History:* briefly reconsidered Eddystone-UID given Beacon Simulator broadcasts both cleanly — Eddystone's `ScanFilter.setServiceUuid(0xFEAA)` is a marginally cleaner filter than iBeacon's manufacturer-data-only option, at the cost of one extra edge case (UID/URL/TLM sibling frames sharing the same service UUID, needing a frame-type byte in the filter mask to exclude). Full comparison is in the conversation. Reverted to iBeacon since the spec names it explicitly — not worth diverging from the example format for a marginal filtering-cleanliness edge.
 
 ## 4. Geofencing
 
@@ -80,9 +73,9 @@ Deliver via a manifest-registered `BroadcastReceiver` (`GeofenceBroadcastReceive
 - Moving average (window ~5 samples) is simple, testable, and good enough for a 4-bucket proximity output.
 - EMA (e.g. α=0.3) needs no buffer, reacts a bit faster to real movement.
 
-**Recommend moving average, window of 5.** Easiest to explain and test with fixture data, and the bucket boundaries (Immediate/Near/Far) already have more resolution than the smoothing precision needs to justify EMA's tuning knob.
+**Decided: moving average, window of 5.** Easiest to explain and test with fixture data, and the bucket boundaries (Immediate/Near/Far) already have more resolution than the smoothing precision needs to justify EMA's tuning knob.
 
-**Beacon-lost timeout (N seconds):** pick N based on the simulator's advertising interval, not a guess. Beacon Simulator/Beacon Toy typically advertise every ~100ms–1s; a real iBeacon is similar. Recommend **N = 10s** — generously more than 10x a typical advertising interval, so it comfortably survives a couple of dropped packets or brief scan-throttling from Doze/App Standby, but still reads as "gone" well before it'd be confusing in the UI log. Document this reasoning in DECISIONS.md and make N a named constant so it's trivially tunable after watching real hardware behavior.
+**Beacon-lost timeout (N seconds):** pick N based on the simulator's advertising interval, not a guess. Beacon Simulator/Beacon Toy typically advertise every ~100ms–1s; a real iBeacon is similar. Recommend **N = 10s** — generously more than 10x a typical advertising interval, so it comfortably survives a couple of dropped packets or brief scan-throttling from Doze/App Standby, but still reads as "gone" well before it'd be confusing in the UI log. Document this reasoning in DECISIONS.md and make N a named constant so it's trivially tunable after watching real hardware behavior. (Still just a lean, not explicitly confirmed — flag if a different N is preferred.)
 
 Implementation shape: each accepted scan result resets a coroutine `Job` (`delay(N.seconds)` → emit `Unknown`/absent); testable by injecting a `TestDispatcher`/virtual clock rather than real `delay`.
 
@@ -140,6 +133,8 @@ Staged, in this order:
 
 Each denial needs to be individually representable in the UI (a "what's missing and why" line per permission), not a single generic "permissions needed" blob — e.g. background location denied should read differently from BLE scan denied, since they break different parts of the flow (geofencing vs. ranging).
 
+**Correction, verified on real hardware during BLE testing:** point 2's assumption — that `neverForLocation` removes the need for `ACCESS_FINE_LOCATION`/Location Services to get BLE scan results — did not hold on the actual test device. Even with `BLUETOOTH_SCAN` declared with `neverForLocation` and granted, scan results were silently empty until `ACCESS_FINE_LOCATION` was also granted. This matches real-world reports that the `neverForLocation` exemption is inconsistently honored across OEM Bluetooth stacks (manifest-merger conflicts from a dependency re-declaring `BLUETOOTH_SCAN` without the flag is one documented cause; OEM-specific enforcement is another) — not something to rely on unconditionally. **Practical fix:** request both `BLUETOOTH_SCAN` and `ACCESS_FINE_LOCATION` together on API 31+ (not either/or), and gate scanning on both being granted. See `VenueScreen.kt`'s permission check.
+
 ## 12. Dependencies added now
 
 Added to `libs.versions.toml` / `app/build.gradle.kts` (see diff) and synced:
@@ -159,8 +154,10 @@ Added to `libs.versions.toml` / `app/build.gradle.kts` (see diff) and synced:
 
 ## 13. Open questions before coding starts
 
-- OK with the iBeacon identity choice (§3) and moving-average smoothing (§6), or prefer median/EMA?
+- ~~OK with the iBeacon identity choice (§3) and moving-average smoothing (§6), or prefer median/EMA?~~ — **Decided**: iBeacon + moving average, confirmed. See DECISIONS.md.
 - ~~OK with "foreground service only while Inside" (§8 option 3)~~ — **Decided**: foreground-only-while-Inside, confirmed. See DECISIONS.md.
+
+All three original open questions are now resolved. Remaining unconfirmed detail: the N=10s beacon-lost timeout in §6 is still a lean, not explicitly signed off.
 
 ## 14. Addendum — can this use a plain (non-foreground) background service?
 

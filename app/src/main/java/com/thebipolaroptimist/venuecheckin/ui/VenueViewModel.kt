@@ -5,9 +5,11 @@ import androidx.lifecycle.viewModelScope
 import com.thebipolaroptimist.venuecheckin.data.ble.BeaconSighting
 import com.thebipolaroptimist.venuecheckin.data.ble.BleScanner
 import com.thebipolaroptimist.venuecheckin.data.geofence.GeofenceSource
+import com.thebipolaroptimist.venuecheckin.data.geofence.GeofenceTransitionEvent
 import com.thebipolaroptimist.venuecheckin.data.location.LocationSource
 import com.thebipolaroptimist.venuecheckin.data.venue.VenueRepository
 import com.thebipolaroptimist.venuecheckin.domain.BeaconLostTimer
+import com.thebipolaroptimist.venuecheckin.domain.ContainmentChecker
 import com.thebipolaroptimist.venuecheckin.domain.Proximity
 import com.thebipolaroptimist.venuecheckin.domain.RssiSmoother
 import com.thebipolaroptimist.venuecheckin.domain.VenueState
@@ -37,6 +39,7 @@ class VenueViewModel @Inject constructor(
     private val bleScanner: BleScanner,
     private val locationSource: LocationSource,
     private val stateMachine: VenueStateMachine,
+    private val containmentChecker: ContainmentChecker,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<VenueState>(VenueState.Outside)
@@ -55,6 +58,68 @@ class VenueViewModel @Inject constructor(
 
     private val _log = MutableStateFlow<List<ScanLogEntry>>(emptyList())
     val log: StateFlow<List<ScanLogEntry>> = _log.asStateFlow()
+
+    // Separate from the BLE log above on purpose (see DECISIONS.md) - geofence transitions and
+    // beacon readings are two different signals, kept visually and structurally distinct while
+    // each is still being verified independently, ahead of combining them into one flow.
+    private val _geofenceLog = MutableStateFlow<List<GeofenceLogEntry>>(emptyList())
+    val geofenceLog: StateFlow<List<GeofenceLogEntry>> = _geofenceLog.asStateFlow()
+
+    init {
+        // Safe to collect before registerGeofences() is ever called - just nothing arrives yet.
+        viewModelScope.launch {
+            geofenceSource.transitions.collect { event -> onGeofenceTransition(event) }
+        }
+    }
+
+    // Venue IDs currently considered "inside", per the geofence log - lets onGeofenceTransition
+    // de-dupe rather than logging the same ENTER twice (once from the immediate manual check
+    // below, once from Play Services' own INITIAL_TRIGGER_ENTER catching up later).
+    private val insideVenueIds = mutableSetOf<String>()
+
+    // Idempotent - re-registering the same venue IDs just replaces the prior request, so this is
+    // safe to call more than once (e.g. if tapped again after a permission grant).
+    fun registerGeofences() {
+        geofenceSource.registerVenues(venueRepository.venues)
+
+        // Play Services' own INITIAL_TRIGGER_ENTER evaluation is opportunistic - it uses
+        // whatever location fix it already has, not necessarily a fresh one, and can take
+        // anywhere from seconds to minutes to fire (planning.md §4 / DECISIONS.md "already
+        // inside"). This fast path gets a fresh fix directly and checks containment immediately,
+        // so the UI doesn't sit waiting on the OS's own timing for a venue already stood in.
+        viewModelScope.launch {
+            val point = locationSource.currentLocation() ?: return@launch
+            venueRepository.venues.forEach { venue ->
+                if (containmentChecker.isWithin(point, venue)) {
+                    onGeofenceTransition(GeofenceTransitionEvent.Entered(venue.id))
+                }
+            }
+        }
+    }
+
+    private fun onGeofenceTransition(event: GeofenceTransitionEvent) {
+        val venueId = when (event) {
+            is GeofenceTransitionEvent.Entered -> event.venueId
+            is GeofenceTransitionEvent.Exited -> event.venueId
+        }
+        // Set.add()/remove() return false when there's no actual state change - skips logging
+        // (and the redundant "Entered" from the slow official path once it catches up).
+        val stateChanged = when (event) {
+            is GeofenceTransitionEvent.Entered -> insideVenueIds.add(venueId)
+            is GeofenceTransitionEvent.Exited -> insideVenueIds.remove(venueId)
+        }
+        if (!stateChanged) return
+
+        val venueName = venueRepository.venues.find { it.id == venueId }?.name ?: venueId
+        val message = when (event) {
+            is GeofenceTransitionEvent.Entered -> "Entered $venueName"
+            is GeofenceTransitionEvent.Exited -> "Exited $venueName"
+        }
+        _geofenceLog.update { entries ->
+            (listOf(GeofenceLogEntry(System.currentTimeMillis(), message)) + entries)
+                .take(LOG_ENTRY_LIMIT)
+        }
+    }
 
     // Scoped to one scan session (start -> stop), separate from viewModelScope, so stopping the
     // scan also tears down the beacon-lost timer's pending delay and its collector in one shot
