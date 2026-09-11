@@ -1,17 +1,28 @@
 package com.thebipolaroptimist.venuecheckin.ui
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.thebipolaroptimist.venuecheckin.data.ble.BeaconSighting
 import com.thebipolaroptimist.venuecheckin.data.ble.BleScanner
 import com.thebipolaroptimist.venuecheckin.data.geofence.GeofenceSource
 import com.thebipolaroptimist.venuecheckin.data.location.LocationSource
 import com.thebipolaroptimist.venuecheckin.data.venue.VenueRepository
+import com.thebipolaroptimist.venuecheckin.domain.RssiSmoother
 import com.thebipolaroptimist.venuecheckin.domain.VenueState
 import com.thebipolaroptimist.venuecheckin.domain.VenueStateMachine
+import com.thebipolaroptimist.venuecheckin.domain.estimateDistanceMeters
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.update
 import javax.inject.Inject
+
+private const val LOG_ENTRY_LIMIT = 20
 
 @HiltViewModel
 class VenueViewModel @Inject constructor(
@@ -24,4 +35,56 @@ class VenueViewModel @Inject constructor(
 
     private val _state = MutableStateFlow<VenueState>(VenueState.Outside)
     val state: StateFlow<VenueState> = _state.asStateFlow()
+
+    // Temporary manual BLE-scanning test harness - verifying the scan/parse path against real
+    // hardware ahead of geofence ENTER/EXIT wiring it up automatically. To be replaced/hidden
+    // once the state machine drives scanning itself (planning.md §7/§8).
+    private val testTarget = venueRepository.venues.first().beacon
+
+    private val _isScanning = MutableStateFlow(false)
+    val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
+
+    private val _currentReading = MutableStateFlow("Not scanning")
+    val currentReading: StateFlow<String> = _currentReading.asStateFlow()
+
+    private val _log = MutableStateFlow<List<ScanLogEntry>>(emptyList())
+    val log: StateFlow<List<ScanLogEntry>> = _log.asStateFlow()
+
+    private var scanJob: Job? = null
+
+    fun toggleScanning() {
+        if (scanJob != null) stopScanning() else startScanning()
+    }
+
+    private fun startScanning() {
+        val smoother = RssiSmoother()
+        _currentReading.value = "Scanning - waiting for beacon..."
+        scanJob = bleScanner.scan(testTarget)
+            .onEach { sighting -> onSighting(sighting, smoother) }
+            .onCompletion { _isScanning.value = false }
+            .launchIn(viewModelScope)
+        _isScanning.value = true
+    }
+
+    private fun stopScanning() {
+        scanJob?.cancel()
+        scanJob = null
+        _isScanning.value = false
+        _currentReading.value = "Not scanning"
+    }
+
+    private fun onSighting(sighting: BeaconSighting, smoother: RssiSmoother) {
+        val smoothedRssi = smoother.add(sighting.rssi)
+        val distanceMeters = estimateDistanceMeters(smoothedRssi, sighting.calibratedTxPower)
+        _currentReading.value = "Scanning - ~%.1f m (rssi %d)".format(distanceMeters, smoothedRssi)
+        _log.update { entries ->
+            (listOf(ScanLogEntry(sighting.timestampMillis, sighting.rssi, smoothedRssi, distanceMeters)) + entries)
+                .take(LOG_ENTRY_LIMIT)
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        scanJob?.cancel()
+    }
 }
