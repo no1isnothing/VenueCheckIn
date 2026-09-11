@@ -1,6 +1,6 @@
 package com.thebipolaroptimist.venuecheckin.domain
 
-// planning.md §6 / DECISIONS.md — moving average, window of 5 (decided).
+// moving average, window of 5 for now. this could also be tuned with different sizes or weights
 class RssiSmoother(
     private val windowSize: Int = 5,
 ) {
