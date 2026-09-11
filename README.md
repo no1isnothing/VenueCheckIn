@@ -20,10 +20,11 @@ Install the debug APK on the device you'll use as the check-in phone; install a 
 Requested together on first launch (`VenueScreen`'s `LaunchedEffect`):
 - `ACCESS_FINE_LOCATION` — required for geofencing and for the app's own containment checks.
 - `BLUETOOTH_SCAN` (API 31+) — required for BLE scanning. On API < 31, `ACCESS_FINE_LOCATION` alone covers BLE scanning too.
+- `POST_NOTIFICATIONS` (API 33+) — required for the foreground-service monitoring notification to actually display.
 
-**Not yet requested: `ACCESS_BACKGROUND_LOCATION`.** It's declared in the manifest but there's no staged runtime request for it yet (Android requires it be requested separately from foreground location, not bundled). Without it, geofence transitions are only reliable while the app has been recently used in the foreground — this is a known, documented gap, not an oversight (see `planning.md` §11 / `DECISIONS.md`).
+**`ACCESS_BACKGROUND_LOCATION` is requested separately**, immediately after the batch above is granted — Android requires it be requested on its own, not bundled with foreground location, and auto-denies it if you try. Without it, geofence transitions are only reliable while the app has been recently used in the foreground.
 
-If either permission is denied, the app degrades rather than crashing: geofence state still updates, but BLE scanning simply never starts until `BLUETOOTH_SCAN`/`ACCESS_FINE_LOCATION` is granted.
+If a permission is denied, the app degrades rather than crashing (geofence state still updates, but BLE scanning simply never starts until location/Bluetooth permissions are granted), and `VenueScreen` shows a "Missing permissions" section listing what's missing and why, with a "Fix permissions" button to re-request.
 
 ## Simulating a beacon
 

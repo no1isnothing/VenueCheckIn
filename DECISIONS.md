@@ -8,6 +8,8 @@ Picked Hilt because it's familiar and common. Also, where possible, built the ap
 
 Added over raw `Log`/`println`. Geofence and BLE transitions are timing-sensitive and, per the prompt's own setup-constraint warning, often only reproducible on real hardware with the app fully backgrounded and no debugger attached — `Timber.d(...)` piped to `adb logcat` is the practical way to see what the state machine did when there was no UI alive to observe it directly.
 
+**Known gap, flagged not fixed — `Timber.DebugTree()` is planted unconditionally.** `VenueCheckInApplication.onCreate()` has the intended `if (BuildConfig.DEBUG) { ... }` gate commented out around `Timber.plant(Timber.DebugTree())`. Almost certainly because `buildFeatures.buildConfig` isn't enabled in `app/build.gradle.kts`, so `BuildConfig.DEBUG` wouldn't even compile as written. Net effect: verbose debug logging ships in every build variant, including release. Low-stakes here since release `optimization` is already off by deliberate choice (see below), but a real ship build would need `buildFeatures.buildConfig = true` (or an equivalent gating mechanism) to restore real debug-only logging.
+
 ## Release optimization (R8) and `testFixtures`: investigated, not changed
 
 Not worthwhile for this exercise, but recorded in the planning doc.
@@ -48,6 +50,8 @@ Scoped to the same per-session `sessionScope` as `beaconLostTimer`, so it's torn
 Tradeoff (see "Battery tradeoffs considered" below): this adds a location fetch on top of the existing geofence machinery, but only while a beacon has already gone quiet (not continuously) — and it's what actually makes the "never scanning while outside" requirement hold in practice, rather than in theory, given how slow real geofence EXIT is.
 
 Tests: `GeofenceExitPollerTest.kt` covers the poller in isolation (interval timing, stop, no-double-schedule on repeated `start()`); `VenueMonitorTest.kt` covers the integration — forces EXIT when location confirms outside, doesn't when still inside, and stops cleanly with no stale forced exit if the beacon reappears before the next poll.
+
+**Known gap, flagged not fixed — containment checks ignore GPS accuracy.** `ContainmentChecker.isWithin()` compares raw lat/lon distance against `venue.radiusMeters` only; it never looks at `Location.accuracy` (the uncertainty radius `FusedLocationProvider` actually reports alongside every fix). This affects both the "already inside" fast path and `GeofenceExitPoller` above, but matters most for the poller: near a 50m boundary that's already below Google's recommended minimum (see above), a single low-accuracy fix could read as "outside" from GPS jitter alone and force a real EXIT + stop scanning, even though the device hasn't actually left. A real fix would pad the effective radius by the fix's reported accuracy (or discard fixes above some accuracy threshold) before trusting a containment result. Not attempted here, out of scope for this pass.
 
 ## Beacon format: iBeacon
 

@@ -33,20 +33,25 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-// Requested as one batch. Background location is deliberately NOT in this list - requirement 8
-// wants it staged separately, and Android auto-denies it if it's bundled with a normal runtime
-// permission request on API 30+.
-private fun foregroundPermissions(): Array<String> =
+// Requested as one batch - safe to bundle since none of these are auto-denied when requested
+// together (unlike background location, which Android requires as a separate, later request -
+// see below). BLUETOOTH_SCAN only exists from API 31; POST_NOTIFICATIONS only from API 33 (below
+// that, notifications don't need runtime permission at all).
+private fun foregroundPermissions(): Array<String> = buildList {
+    add(Manifest.permission.ACCESS_FINE_LOCATION)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.ACCESS_FINE_LOCATION)
-    } else {
-        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        add(Manifest.permission.BLUETOOTH_SCAN)
     }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        add(Manifest.permission.POST_NOTIFICATIONS)
+    }
+}.toTypedArray()
 
 private fun permissionLabel(permission: String): String = when (permission) {
     Manifest.permission.ACCESS_FINE_LOCATION -> "Location"
     Manifest.permission.BLUETOOTH_SCAN -> "Nearby devices (Bluetooth scan)"
     Manifest.permission.ACCESS_BACKGROUND_LOCATION -> "Background location"
+    Manifest.permission.POST_NOTIFICATIONS -> "Notifications"
     else -> permission
 }
 
@@ -55,6 +60,8 @@ private fun permissionReason(permission: String): String = when (permission) {
     Manifest.permission.BLUETOOTH_SCAN -> "beacon scanning won't work"
     Manifest.permission.ACCESS_BACKGROUND_LOCATION ->
         "geofence transitions won't be detected while the app is backgrounded"
+    Manifest.permission.POST_NOTIFICATIONS ->
+        "the monitoring notification won't show while scanning runs in the background"
     else -> "some functionality may not work"
 }
 
