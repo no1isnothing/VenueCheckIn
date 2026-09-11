@@ -10,6 +10,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -17,7 +20,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -28,6 +33,31 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+// Requested as one batch. Background location is deliberately NOT in this list - requirement 8
+// wants it staged separately, and Android auto-denies it if it's bundled with a normal runtime
+// permission request on API 30+.
+private fun foregroundPermissions(): Array<String> =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.ACCESS_FINE_LOCATION)
+    } else {
+        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+    }
+
+private fun permissionLabel(permission: String): String = when (permission) {
+    Manifest.permission.ACCESS_FINE_LOCATION -> "Location"
+    Manifest.permission.BLUETOOTH_SCAN -> "Nearby devices (Bluetooth scan)"
+    Manifest.permission.ACCESS_BACKGROUND_LOCATION -> "Background location"
+    else -> permission
+}
+
+private fun permissionReason(permission: String): String = when (permission) {
+    Manifest.permission.ACCESS_FINE_LOCATION -> "geofencing and beacon scanning won't work at all"
+    Manifest.permission.BLUETOOTH_SCAN -> "beacon scanning won't work"
+    Manifest.permission.ACCESS_BACKGROUND_LOCATION ->
+        "geofence transitions won't be detected while the app is backgrounded"
+    else -> "some functionality may not work"
+}
+
 @Composable
 fun VenueScreen(viewModel: VenueViewModel = hiltViewModel()) {
     val currentReading by viewModel.currentReading.collectAsState()
@@ -37,23 +67,50 @@ fun VenueScreen(viewModel: VenueViewModel = hiltViewModel()) {
 
     val context = LocalContext.current
 
-    val requiredPermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.ACCESS_FINE_LOCATION)
-    } else {
-        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
-    }
-    fun hasAllPermissions() = requiredPermissions.all {
-        ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
-    }
-    val permissionLauncher = rememberLauncherForActivityResult(
+    fun isGranted(permission: String) =
+        ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+
+    fun currentlyMissing() =
+        (foregroundPermissions().toList() + Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+            .filterNot(::isGranted)
+
+    var missingPermissions by remember { mutableStateOf(currentlyMissing()) }
+
+    val backgroundLocationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { missingPermissions = currentlyMissing() }
+
+    val foregroundLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
-    ) { _ -> if (hasAllPermissions()) viewModel.registerGeofences() }
+    ) { _ ->
+        missingPermissions = currentlyMissing()
+        if (foregroundPermissions().all(::isGranted)) {
+            viewModel.registerGeofences()
+            if (!isGranted(Manifest.permission.ACCESS_BACKGROUND_LOCATION)) {
+                backgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+            }
+        }
+    }
+
+    // Foreground first; background location only once foreground is actually granted (staged
+    // per requirement 8 - see foregroundPermissions() comment above).
+    fun requestMissingPermissions() {
+        val missingForeground = foregroundPermissions().filterNot(::isGranted)
+        if (missingForeground.isNotEmpty()) {
+            foregroundLauncher.launch(missingForeground.toTypedArray())
+        } else if (!isGranted(Manifest.permission.ACCESS_BACKGROUND_LOCATION)) {
+            backgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+        }
+    }
 
     LaunchedEffect(Unit) {
-        if (hasAllPermissions()) {
+        if (foregroundPermissions().all(::isGranted)) {
             viewModel.registerGeofences()
+            if (!isGranted(Manifest.permission.ACCESS_BACKGROUND_LOCATION)) {
+                backgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+            }
         } else {
-            permissionLauncher.launch(requiredPermissions)
+            foregroundLauncher.launch(foregroundPermissions())
         }
     }
 
@@ -64,7 +121,8 @@ fun VenueScreen(viewModel: VenueViewModel = hiltViewModel()) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(16.dp),
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
         ) {
             Text(
                 text = currentReading,
@@ -78,6 +136,26 @@ fun VenueScreen(viewModel: VenueViewModel = hiltViewModel()) {
                 text = if (isScanning) "● Scanning" else "○ Not scanning",
                 style = MaterialTheme.typography.bodyMedium,
             )
+
+            if (missingPermissions.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "Missing permissions",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                for (permission in missingPermissions) {
+                    Text(
+                        text = "• ${permissionLabel(permission)} — ${permissionReason(permission)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Button(onClick = { requestMissingPermissions() }) {
+                    Text("Fix permissions")
+                }
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
 

@@ -21,11 +21,11 @@ class VenueRepository @Inject constructor() {
                 minor = 1,
             ),
         ),*/
-        Venue(
+     /*   Venue(
             id = "venue-2",
             name = "Lot 25",
             latitude = 30.175302,
-            longitude = 97.272680,
+            longitude = -97.272680,
             radiusMeters = 50f,
             // Update these if you actually put a beacon over there.
             beacon = BeaconIdentity(
@@ -33,7 +33,7 @@ class VenueRepository @Inject constructor() {
                 major = 2,
                 minor = 1,
             ),
-        ),
+        ),*/
         Venue(
             id = "venue-3",
             name = "House",

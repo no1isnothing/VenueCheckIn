@@ -183,6 +183,19 @@ class VenueMonitor @Inject constructor(
         scanScope = sessionScope
         val beaconLostTimer = BeaconLostTimer(sessionScope)
 
+        // Real geofence EXIT can take minutes to fire (see DECISIONS.md). Once the beacon is
+        // lost, poll actual location periodically as a faster local backstop - if it confirms
+        // we're outside the venue, force the exact same exit path a real geofence EXIT would
+        // take (onGeofenceTransition), rather than a separate/parallel code path. Scoped to
+        // sessionScope like beaconLostTimer, so it's torn down automatically by stopScanning().
+        val exitPoller = GeofenceExitPoller(sessionScope) {
+            val point = locationSource.currentLocation() ?: return@GeofenceExitPoller
+            if (!containmentChecker.isWithin(point, venue)) {
+                Timber.i("GeofenceExitPoller: confirmed outside ${venue.id} via location, forcing EXIT")
+                onGeofenceTransition(GeofenceTransitionEvent.Exited(venue.id))
+            }
+        }
+
         bleScanner.scan(venue.beacon)
             .onEach { sighting ->
                 beaconLostTimer.beaconSeen()
@@ -193,7 +206,14 @@ class VenueMonitor @Inject constructor(
         _isScanning.value = true
 
         sessionScope.launch {
-            beaconLostTimer.lost.collect { lost -> if (lost) onBeaconLost() }
+            beaconLostTimer.lost.collect { lost ->
+                if (lost) {
+                    onBeaconLost()
+                    exitPoller.start()
+                } else {
+                    exitPoller.stop()
+                }
+            }
         }
     }
 
