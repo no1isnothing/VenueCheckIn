@@ -1,6 +1,4 @@
-package com.thebipolaroptimist.venuecheckin.ui
-
-import com.thebipolaroptimist.venuecheckin.domain.Proximity
+package com.thebipolaroptimist.venuecheckin.domain
 
 data class ScanLogEntry(
     val timestampMillis: Long,

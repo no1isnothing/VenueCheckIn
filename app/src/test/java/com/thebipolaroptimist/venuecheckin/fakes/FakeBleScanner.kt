@@ -5,6 +5,7 @@ import com.thebipolaroptimist.venuecheckin.data.ble.BleScanner
 import com.thebipolaroptimist.venuecheckin.data.venue.BeaconIdentity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onStart
 
@@ -20,6 +21,7 @@ class FakeBleScanner : BleScanner {
 
     override fun scan(target: BeaconIdentity): Flow<BeaconSighting> {
         return sightings
+            .filter { it.identity == target }
             .onStart {
                 isScanning = true
                 lastScanTarget = target

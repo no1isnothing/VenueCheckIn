@@ -1,4 +1,4 @@
-package com.thebipolaroptimist.venuecheckin.ui
+package com.thebipolaroptimist.venuecheckin.domain
 
 data class GeofenceLogEntry(
     val timestampMillis: Long,

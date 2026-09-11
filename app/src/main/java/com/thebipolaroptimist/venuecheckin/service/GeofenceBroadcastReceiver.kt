@@ -34,6 +34,7 @@ class GeofenceBroadcastReceiver : BroadcastReceiver() {
         when (event.geofenceTransition) {
 
             Geofence.GEOFENCE_TRANSITION_ENTER -> {
+                Timber.i("GeofenceBroadcastReceiver: real ENTER for %s", venueIds)
                 venueIds.forEach { venueId ->
                     geofenceSource.onTransitionReceived(GeofenceTransitionEvent.Entered(venueId))
                 }
@@ -41,6 +42,7 @@ class GeofenceBroadcastReceiver : BroadcastReceiver() {
             }
 
             Geofence.GEOFENCE_TRANSITION_EXIT -> {
+                Timber.i("GeofenceBroadcastReceiver: real EXIT for %s", venueIds)
                 venueIds.forEach { venueId ->
                     geofenceSource.onTransitionReceived(GeofenceTransitionEvent.Exited(venueId))
                 }

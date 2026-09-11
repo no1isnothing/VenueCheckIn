@@ -10,11 +10,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -23,14 +23,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.thebipolaroptimist.venuecheckin.domain.displayName
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 @Composable
 fun VenueScreen(viewModel: VenueViewModel = hiltViewModel()) {
-    val isScanning by viewModel.isScanning.collectAsState()
     val currentReading by viewModel.currentReading.collectAsState()
+    val isScanning by viewModel.isScanning.collectAsState()
     val log by viewModel.log.collectAsState()
     val geofenceLog by viewModel.geofenceLog.collectAsState()
 
@@ -41,28 +42,20 @@ fun VenueScreen(viewModel: VenueViewModel = hiltViewModel()) {
     } else {
         arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
     }
-    fun hasAllScanPermissions() = requiredPermissions.all {
+    fun hasAllPermissions() = requiredPermissions.all {
         ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
     }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
-    ) { _ ->
-        if (hasAllScanPermissions()) viewModel.toggleScanning()
-    }
+    ) { _ -> if (hasAllPermissions()) viewModel.registerGeofences() }
 
-    // Geofencing only needs fine location, not BLUETOOTH_SCAN - kept as its own permission check
-    // and launcher, separate from the BLE one above, matching the "separate from beacon" ask.
-    // Background location (needed for transitions to fire reliably once the app isn't in the
-    // foreground) isn't requested here yet - planning.md §11's staged permission flow is still
-    // unbuilt; this is foreground-only manual verification for now.
-    fun hasFineLocationPermission() =
-        ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_FINE_LOCATION,
-        ) == PackageManager.PERMISSION_GRANTED
-    val geofencePermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted -> if (granted) viewModel.registerGeofences() }
+    LaunchedEffect(Unit) {
+        if (hasAllPermissions()) {
+            viewModel.registerGeofences()
+        } else {
+            permissionLauncher.launch(requiredPermissions)
+        }
+    }
 
     val timeFormatter = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
 
@@ -78,35 +71,15 @@ fun VenueScreen(viewModel: VenueViewModel = hiltViewModel()) {
                 style = MaterialTheme.typography.headlineSmall,
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
-            Button(
-                onClick = {
-                    if (isScanning || hasAllScanPermissions()) {
-                        viewModel.toggleScanning()
-                    } else {
-                        permissionLauncher.launch(requiredPermissions)
-                    }
-                },
-            ) {
-                Text(if (isScanning) "Stop Scanning" else "Start Scanning")
-            }
+            // Sanity-check indicator, mostly for debugging
+            Text(
+                text = if (isScanning) "● Scanning" else "○ Not scanning",
+                style = MaterialTheme.typography.bodyMedium,
+            )
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Button(
-                onClick = {
-                    if (hasFineLocationPermission()) {
-                        viewModel.registerGeofences()
-                    } else {
-                        geofencePermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-                    }
-                },
-            ) {
-                Text("Register Geofences")
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             Text(text = "Geofence Log", style = MaterialTheme.typography.titleMedium)
 

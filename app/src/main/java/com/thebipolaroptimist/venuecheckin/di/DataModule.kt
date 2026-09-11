@@ -6,6 +6,10 @@ import com.thebipolaroptimist.venuecheckin.data.geofence.GeofenceSource
 import com.thebipolaroptimist.venuecheckin.data.geofence.PlayServicesGeofenceSource
 import com.thebipolaroptimist.venuecheckin.data.location.FusedLocationSource
 import com.thebipolaroptimist.venuecheckin.data.location.LocationSource
+import com.thebipolaroptimist.venuecheckin.data.permission.AndroidPermissionChecker
+import com.thebipolaroptimist.venuecheckin.data.permission.PermissionChecker
+import com.thebipolaroptimist.venuecheckin.data.service.AndroidServiceStarter
+import com.thebipolaroptimist.venuecheckin.data.service.ServiceStarter
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -23,4 +27,10 @@ abstract class DataModule {
 
     @Binds
     abstract fun bindLocationSource(impl: FusedLocationSource): LocationSource
+
+    @Binds
+    abstract fun bindPermissionChecker(impl: AndroidPermissionChecker): PermissionChecker
+
+    @Binds
+    abstract fun bindServiceStarter(impl: AndroidServiceStarter): ServiceStarter
 }

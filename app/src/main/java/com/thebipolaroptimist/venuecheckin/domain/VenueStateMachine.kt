@@ -14,8 +14,10 @@ class VenueStateMachine @Inject constructor() {
         VenueEvent.BeaconLost -> onBeaconLost(current)
     }
 
+    // See VenueState.kt's venueOrNull() doc comment - overlapping geofences aren't handled
+    // correctly yet (entering a second, overlapping venue silently drops tracking of the first).
     private fun onEnter(current: VenueState, venue: Venue): VenueState {
-        return if (current.venueIdOrNull() == venue.id) {
+        return if (current.venueOrNull()?.id == venue.id) {
             // Already Inside/InRange for this venue
             // a duplicate ENTER is a no-op.
             current
@@ -25,7 +27,7 @@ class VenueStateMachine @Inject constructor() {
     }
 
     private fun onExit(current: VenueState, venue: Venue): VenueState {
-        return if (current.venueIdOrNull() == venue.id) {
+        return if (current.venueOrNull()?.id == venue.id) {
             VenueState.Outside
         } else {
             // Not the venue we're currently tracking - ignore.
@@ -48,11 +50,5 @@ class VenueStateMachine @Inject constructor() {
         } else {
             current
         }
-    }
-
-    private fun VenueState.venueIdOrNull(): String? = when (this) {
-        is VenueState.Inside -> venue.id
-        is VenueState.InRange -> venue.id
-        VenueState.Outside -> null
     }
 }

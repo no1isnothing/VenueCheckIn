@@ -28,19 +28,10 @@ class VenueMonitorService : Service() {
         createNotificationChannelIfNeeded()
         startForeground(NOTIFICATION_ID, buildNotification())
 
-        // TODO: start BLE scanning here (BleScanner + VenueStateMachine) once the standalone
-        // BLE-scanning path (currently a manual-button test harness in VenueViewModel) and this
-        // geofencing path have each been independently verified. Deliberately not wired together
-        // yet - see planning.md's scaffolding notes.
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         return START_NOT_STICKY
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        // TODO: stop BLE scanning here once it's started in onCreate above.
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
