@@ -32,8 +32,7 @@ class PlatformBleScanner @Inject constructor(
         get() = (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)
             ?.adapter?.bluetoothLeScanner
 
-    // Permission (BLUETOOTH_SCAN / ACCESS_FINE_LOCATION depending on SDK) is checked by the
-    // caller before scan() is invoked - see VenueScreen's permission gate.
+    // Permission are checked by caller (VenueViewModel) before invoking this method, so we can suppress the lint warning here.
     @SuppressLint("MissingPermission")
     override fun scan(target: BeaconIdentity): Flow<BeaconSighting> = callbackFlow {
         val scanner = bluetoothLeScanner
@@ -65,11 +64,7 @@ private fun defaultScanSettings(): ScanSettings =
         .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
         .build()
 
-// Radio-level filter matching Apple manufacturer data + iBeacon subtype/length + this venue's
-// UUID; major/minor/txPower are left as "don't care" in the mask (0x00) and matched in software
-// in parseIBeaconSighting/scan, since one UUID can carry multiple major/minor beacons. Restored
-// after being removed mid-debugging on a diagnosis (silently dropping all results) that turned
-// out to more likely be a missing ACCESS_FINE_LOCATION grant, not this filter - see DECISIONS.md.
+// Radio-level filter matching Apple manufacturer data + iBeacon subtype/length + this venue's  UUID
 private fun buildIBeaconScanFilter(target: BeaconIdentity): ScanFilter {
     val data = ByteArray(IBEACON_PAYLOAD_LENGTH)
     val mask = ByteArray(IBEACON_PAYLOAD_LENGTH)

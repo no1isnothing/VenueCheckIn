@@ -84,10 +84,10 @@ fun VenueScreen(viewModel: VenueViewModel = hiltViewModel()) {
 
             Column {
                 for (entry in log) {
+                    val distanceText = entry.distanceMeters?.let { "~${"%.1f".format(it)} m" } ?: "-"
                     Text(
                         text = "${timeFormatter.format(Date(entry.timestampMillis))}   " +
-                            "rssi ${entry.smoothedRssi} (raw ${entry.rawRssi})   " +
-                            "~${"%.1f".format(entry.distanceMeters)} m",
+                            "${entry.proximity.displayName()}   $distanceText",
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }

@@ -1,23 +1,35 @@
 package com.thebipolaroptimist.venuecheckin.domain
 
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
-// planning.md §6 — N = 10s beacon-lost timeout (leaning). Reset on every beaconSeen();
-// if nothing arrives within timeout, `lost` flips to true.
+// Hard-coded for interview scope, could be configured elsewhere in a real app
+val DEFAULT_BEACON_LOST_TIMEOUT: Duration = 5.seconds
+
+// Tracks whether a beacon has been seen recently.
 class BeaconLostTimer(
     private val scope: CoroutineScope,
-    private val timeout: Duration = 10.seconds,
+    private val timeout: Duration = DEFAULT_BEACON_LOST_TIMEOUT,
 ) {
 
     private val _lost = MutableStateFlow(false)
-    val lost: Flow<Boolean> = _lost.asStateFlow()
+    val lost: StateFlow<Boolean> = _lost.asStateFlow()
+
+    private var timeoutJob: Job? = null
 
     fun beaconSeen() {
-        TODO("planning.md §6 — beacon-lost timer logic still pending")
+        timeoutJob?.cancel()
+        _lost.value = false
+        timeoutJob = scope.launch {
+            delay(timeout)
+            _lost.value = true
+        }
     }
 }
