@@ -70,6 +70,10 @@ class VenueMonitorTest {
 
     @After
     fun tearDown() {
+        // Must run before resetMain() - see VenueMonitor.cancelForTesting() doc. Without this, a
+        // test that leaves GeofenceBorderPoller's loop running (beacon lost, never confirmed
+        // outside) hangs runTest's own cleanup instead of failing cleanly.
+        monitor.cancelForTesting()
         Dispatchers.resetMain()
     }
 
@@ -102,6 +106,16 @@ class VenueMonitorTest {
 
     @Test
     fun `entering a different venue retargets scanning to it`() = runTest(testDispatcher) {
+        // VenueMonitor resolves a GeofenceTransitionEvent's venue ID via
+        // venueRepository.venues.find { } - there's no fake/interface for VenueRepository (it's
+        // plain hardcoded data, not a framework boundary), so this test's fixture venues have to
+        // actually be in there. Skip rather than fail if fewer than 2 are currently configured
+        // (e.g. mid real-device testing with venues temporarily commented out) - this isn't
+        // exercising anything specific to a particular pair of venues, just "switching targets."
+        org.junit.Assume.assumeTrue(
+            "requires at least 2 configured venues",
+            venueRepository.venues.size >= 2,
+        )
         val venueA = venueRepository.venues[0]
         val venueB = venueRepository.venues[1]
 
@@ -114,6 +128,54 @@ class VenueMonitorTest {
         assertEquals(venueB.beacon, bleScanner.lastScanTarget)
         assertEquals(VenueState.Inside(venueB), monitor.state.value)
     }
+
+    @Test
+    fun `real EXIT is applied when a fresh location check confirms outside`() = runTest(testDispatcher) {
+        val venue = venueRepository.venues.first()
+        locationSource.location = GeoPoint(venue.latitude, venue.longitude)
+        geofenceSource.emit(GeofenceTransitionEvent.Entered(venue.id))
+        assertEquals(VenueState.Inside(venue), monitor.state.value)
+
+        locationSource.location = GeoPoint(venue.latitude + 0.01, venue.longitude)
+        geofenceSource.emit(GeofenceTransitionEvent.Exited(venue.id))
+
+        assertEquals(VenueState.Outside, monitor.state.value)
+        assertFalse(bleScanner.isScanning)
+    }
+
+    @Test
+    fun `stale delayed EXIT for an earlier visit is ignored when location still confirms inside`() =
+        runTest(testDispatcher) {
+            val venue = venueRepository.venues.first()
+
+            // Real ENTER for the current visit - a fresh location check confirms we're inside.
+            locationSource.location = GeoPoint(venue.latitude, venue.longitude)
+            geofenceSource.emit(GeofenceTransitionEvent.Entered(venue.id))
+            assertEquals(VenueState.Inside(venue), monitor.state.value)
+
+            // A stale/delayed EXIT arrives (e.g. Play Services' late notice of an earlier
+            // departure that's since been re-entered) - location, checked fresh right now, still
+            // confirms we're inside, so it must be ignored rather than forcing Outside. This is
+            // the exact bug documented in DECISIONS.md under "stale/out-of-order geofence
+            // transitions."
+            geofenceSource.emit(GeofenceTransitionEvent.Exited(venue.id))
+
+            assertEquals(VenueState.Inside(venue), monitor.state.value)
+            assertTrue(bleScanner.isScanning)
+            assertTrue(monitor.geofenceLog.value.none { it.message.startsWith("Exited") })
+        }
+
+    @Test
+    fun `geofence transition falls back to trusting the raw event when location is unavailable`() =
+        runTest(testDispatcher) {
+            val venue = venueRepository.venues.first()
+            locationSource.location = null
+
+            geofenceSource.emit(GeofenceTransitionEvent.Entered(venue.id))
+
+            assertEquals(VenueState.Inside(venue), monitor.state.value)
+            assertTrue(bleScanner.isScanning)
+        }
 
     @Test
     fun `scanning does not start without scan permission`() = runTest(testDispatcher) {
@@ -228,7 +290,7 @@ class VenueMonitorTest {
         // Location confirms we're well outside the venue's radius.
         locationSource.location = GeoPoint(venue.latitude + 0.01, venue.longitude)
 
-        testDispatcher.scheduler.advanceTimeBy(DEFAULT_GEOFENCE_EXIT_POLL_INTERVAL.inWholeMilliseconds + 100)
+        testDispatcher.scheduler.advanceTimeBy(DEFAULT_GEOFENCE_BORDER_POLL_INTERVAL.inWholeMilliseconds + 100)
         testDispatcher.scheduler.runCurrent()
 
         assertEquals(VenueState.Outside, monitor.state.value)
@@ -256,7 +318,7 @@ class VenueMonitorTest {
         // Location still confirms we're at the venue's center - well within the radius.
         locationSource.location = GeoPoint(venue.latitude, venue.longitude)
 
-        testDispatcher.scheduler.advanceTimeBy(DEFAULT_GEOFENCE_EXIT_POLL_INTERVAL.inWholeMilliseconds + 100)
+        testDispatcher.scheduler.advanceTimeBy(DEFAULT_GEOFENCE_BORDER_POLL_INTERVAL.inWholeMilliseconds + 100)
         testDispatcher.scheduler.runCurrent()
 
         assertEquals(VenueState.Inside(venue), monitor.state.value)
@@ -264,41 +326,83 @@ class VenueMonitorTest {
     }
 
     @Test
-    fun `exit poller stops once the beacon reappears, no stale forced EXIT`() = runTest(testDispatcher) {
-        val venue = venueRepository.venues.first()
-        geofenceSource.emit(GeofenceTransitionEvent.Entered(venue.id))
-        bleScanner.emit(
-            BeaconSighting(
-                identity = venue.beacon,
-                rssi = -60,
-                calibratedTxPower = -59,
-                timestampMillis = 1_000L,
-            ),
-        )
+    fun `border poller flips back to Entered when the user returns after a forced EXIT`() =
+        runTest(testDispatcher) {
+            // Reproduces the real bug this was built to fix: exit via the poller, then a quick
+            // re-entry before any real geofence ENTER has a chance to fire - previously nothing
+            // was left watching for this, since stopScanning() (triggered by the forced EXIT)
+            // used to tear down the poller along with the rest of the scan session.
+            val venue = venueRepository.venues.first()
+            geofenceSource.emit(GeofenceTransitionEvent.Entered(venue.id))
+            bleScanner.emit(
+                BeaconSighting(
+                    identity = venue.beacon,
+                    rssi = -60,
+                    calibratedTxPower = -59,
+                    timestampMillis = 1_000L,
+                ),
+            )
 
-        testDispatcher.scheduler.advanceTimeBy(DEFAULT_BEACON_LOST_TIMEOUT.inWholeMilliseconds + 100)
-        testDispatcher.scheduler.runCurrent()
-        assertEquals(VenueState.Inside(venue), monitor.state.value)
+            testDispatcher.scheduler.advanceTimeBy(DEFAULT_BEACON_LOST_TIMEOUT.inWholeMilliseconds + 100)
+            testDispatcher.scheduler.runCurrent()
 
-        // Beacon reappears before the poll interval elapses.
-        bleScanner.emit(
-            BeaconSighting(
-                identity = venue.beacon,
-                rssi = -60,
-                calibratedTxPower = -59,
-                timestampMillis = 2_000L,
-            ),
-        )
-        assertTrue(monitor.state.value is VenueState.InRange)
+            // First poll: confirmed outside - forces EXIT.
+            locationSource.location = GeoPoint(venue.latitude + 0.01, venue.longitude)
+            testDispatcher.scheduler.advanceTimeBy(DEFAULT_GEOFENCE_BORDER_POLL_INTERVAL.inWholeMilliseconds + 100)
+            testDispatcher.scheduler.runCurrent()
+            assertEquals(VenueState.Outside, monitor.state.value)
+            assertFalse(bleScanner.isScanning)
 
-        // Even though location would confirm outside, the poller should have been stopped.
-        locationSource.location = GeoPoint(venue.latitude + 0.01, venue.longitude)
-        testDispatcher.scheduler.advanceTimeBy(DEFAULT_GEOFENCE_EXIT_POLL_INTERVAL.inWholeMilliseconds * 3)
-        testDispatcher.scheduler.runCurrent()
+            // User quickly returns. The same poller instance (never torn down) should catch this
+            // on its next poll and flip back to Entered, resuming scanning.
+            locationSource.location = GeoPoint(venue.latitude, venue.longitude)
+            testDispatcher.scheduler.advanceTimeBy(DEFAULT_GEOFENCE_BORDER_POLL_INTERVAL.inWholeMilliseconds + 100)
+            testDispatcher.scheduler.runCurrent()
 
-        assertTrue(monitor.geofenceLog.value.none { it.message.startsWith("Exited") })
-        assertTrue(bleScanner.isScanning)
-    }
+            assertEquals(VenueState.Inside(venue), monitor.state.value)
+            assertTrue(bleScanner.isScanning)
+            assertEquals("Entered ${venue.name}", monitor.geofenceLog.value.first().message)
+        }
+
+    @Test
+    fun `border poller keeps running its full window even after the beacon reappears`() =
+        runTest(testDispatcher) {
+            // Deliberate design choice, see DECISIONS.md "GeofenceBorderPoller": once triggered,
+            // the poller runs its full maxDuration window regardless of subsequent beacon
+            // sightings, rather than being stopped early - this is what lets it also catch a
+            // later exit within the same window. The tradeoff is exactly what this test shows: a
+            // stale/inaccurate location reading can force an EXIT even while the beacon is
+            // actively being seen.
+            val venue = venueRepository.venues.first()
+            geofenceSource.emit(GeofenceTransitionEvent.Entered(venue.id))
+            bleScanner.emit(
+                BeaconSighting(
+                    identity = venue.beacon,
+                    rssi = -60,
+                    calibratedTxPower = -59,
+                    timestampMillis = 1_000L,
+                ),
+            )
+
+            testDispatcher.scheduler.advanceTimeBy(DEFAULT_BEACON_LOST_TIMEOUT.inWholeMilliseconds + 100)
+            testDispatcher.scheduler.runCurrent()
+
+            bleScanner.emit(
+                BeaconSighting(
+                    identity = venue.beacon,
+                    rssi = -60,
+                    calibratedTxPower = -59,
+                    timestampMillis = 2_000L,
+                ),
+            )
+            assertTrue(monitor.state.value is VenueState.InRange)
+
+            locationSource.location = GeoPoint(venue.latitude + 0.01, venue.longitude)
+            testDispatcher.scheduler.advanceTimeBy(DEFAULT_GEOFENCE_BORDER_POLL_INTERVAL.inWholeMilliseconds + 100)
+            testDispatcher.scheduler.runCurrent()
+
+            assertEquals(VenueState.Outside, monitor.state.value)
+        }
 
     @Test
     fun `already-inside fast path starts scanning and monitoring immediately on registerGeofences`() =
@@ -327,5 +431,7 @@ class VenueMonitorTest {
             // service) since it isn't triggered by GeofenceBroadcastReceiver, which handles that
             // itself for real transitions - see DECISIONS.md.
             assertTrue(serviceStarter.isMonitoring)
+
+            vm.cancelForTesting()
         }
 }

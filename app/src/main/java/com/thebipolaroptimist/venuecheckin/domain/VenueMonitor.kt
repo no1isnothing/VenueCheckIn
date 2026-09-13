@@ -67,12 +67,12 @@ class VenueMonitor @Inject constructor(
     private val _geofenceLog = MutableStateFlow<List<GeofenceLogEntry>>(emptyList())
     val geofenceLog: StateFlow<List<GeofenceLogEntry>> = _geofenceLog.asStateFlow()
 
-    // Venue IDs currently considered "inside", per the geofence log. For deduping events.
-    private val insideVenueIds = mutableSetOf<String>()
-
     // Scoped to one BLE scan session (started on geofence ENTER, stopped on EXIT - requirement 4),
     private var scanScope: CoroutineScope? = null
     private var scanningVenueId: String? = null
+
+    private var borderPoller: GeofenceBorderPoller? = null
+    private var borderPollerVenueId: String? = null
 
     init {
         Timber.i("VenueMonitor created (process/singleton (re)initialized)")
@@ -88,9 +88,7 @@ class VenueMonitor @Inject constructor(
                 }
             }
         }
-        // Register on init rather than behind a button - only takes effect if permission is
-        // already granted from a previous session. VenueScreen requests permission on launch and
-        // calls registerGeofences() again once granted, to cover the not-yet-granted case.
+
         if (permissionChecker.isGranted(Manifest.permission.ACCESS_FINE_LOCATION)) {
             registerGeofences()
         }
@@ -105,44 +103,62 @@ class VenueMonitor @Inject constructor(
         scope.launch {
             val point = locationSource.currentLocation() ?: return@launch
             venueRepository.venues.forEach { venue ->
-                if (containmentChecker.isWithin(point, venue)) {
-                    onGeofenceTransition(GeofenceTransitionEvent.Entered(venue.id))
+                val actuallyInside = containmentChecker.isWithin(point, venue)
+                reconcileContainment(venue, actuallyInside)
+                if (actuallyInside) {
                     serviceStarter.startMonitoring()
                 }
             }
         }
     }
 
-    private fun onGeofenceTransition(event: GeofenceTransitionEvent) {
+    // A geofence transition (real, from Play Services, or GeofenceBorderPoller's forced local one)
+    // is treated as a signal to re-check, not as ground truth by itself - see DECISIONS.md
+    private suspend fun onGeofenceTransition(event: GeofenceTransitionEvent) {
         val venueId = when (event) {
             is GeofenceTransitionEvent.Entered -> event.venueId
             is GeofenceTransitionEvent.Exited -> event.venueId
         }
-
-        val stateChanged = when (event) {
-            is GeofenceTransitionEvent.Entered -> insideVenueIds.add(venueId)
-            is GeofenceTransitionEvent.Exited -> insideVenueIds.remove(venueId)
-        }
-        if (!stateChanged) return
-
         val venue = venueRepository.venues.find { it.id == venueId }
         val venueName = venue?.name ?: venueId
-        val message = when (event) {
-            is GeofenceTransitionEvent.Entered -> "Entered $venueName"
-            is GeofenceTransitionEvent.Exited -> "Exited $venueName"
+
+        // Logged unconditionally for debugging and testing.
+        val rawLabel = when (event) {
+            is GeofenceTransitionEvent.Entered -> "ENTER"
+            is GeofenceTransitionEvent.Exited -> "EXIT"
+        }
+        val rawMessage = "Geofence API: $rawLabel received for $venueName"
+        Timber.i("VenueMonitor: $rawMessage")
+        _geofenceLog.update { entries ->
+            (listOf(GeofenceLogEntry(System.currentTimeMillis(), rawMessage)) + entries)
+                .take(LOG_ENTRY_LIMIT)
         }
 
+        if (venue == null) return // unknown venue id - nothing to reconcile against
+
+        val point = locationSource.currentLocation()
+        val actuallyInside = if (point != null) {
+            containmentChecker.isWithin(point, venue)
+        } else {
+            // Location fix failed - fall back to trusting the raw event rather than doing
+            // nothing.
+            event is GeofenceTransitionEvent.Entered
+        }
+        reconcileContainment(venue, actuallyInside)
+    }
+
+    private fun reconcileContainment(venue: Venue, actuallyInside: Boolean) {
+        val alreadyTrackingThisVenue = _state.value.venueOrNull()?.id == venue.id
+        if (actuallyInside == alreadyTrackingThisVenue) return
+
+        val message = if (actuallyInside) "Entered ${venue.name}" else "Exited ${venue.name}"
         Timber.i("VenueMonitor: $message")
         _geofenceLog.update { entries ->
             (listOf(GeofenceLogEntry(System.currentTimeMillis(), message)) + entries)
                 .take(LOG_ENTRY_LIMIT)
         }
 
-        if (venue == null) return // unknown venue id - nothing to drive the state machine with
-        val venueEvent = when (event) {
-            is GeofenceTransitionEvent.Entered -> VenueEvent.Enter(venue)
-            is GeofenceTransitionEvent.Exited -> VenueEvent.Exit(venue)
-        }
+        val venueEvent = if (actuallyInside) VenueEvent.Enter(venue) else VenueEvent.Exit(venue)
         applyStateChange(venueEvent)
     }
 
@@ -165,7 +181,14 @@ class VenueMonitor @Inject constructor(
     }
 
     private fun startScanningForVenue(venue: Venue) {
-        stopScanning() // tear down any existing session first (e.g. switching venues)
+        stopScanning() // tear down any existing BLE-scan session first (e.g. switching venues)
+
+        // A border poller for a DIFFERENT venue is stale - stop it.
+        if (borderPollerVenueId != null && borderPollerVenueId != venue.id) {
+            borderPoller?.stop()
+            borderPoller = null
+            borderPollerVenueId = null
+        }
 
         val scanPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             Manifest.permission.BLUETOOTH_SCAN
@@ -183,19 +206,6 @@ class VenueMonitor @Inject constructor(
         scanScope = sessionScope
         val beaconLostTimer = BeaconLostTimer(sessionScope)
 
-        // Real geofence EXIT can take minutes to fire (see DECISIONS.md). Once the beacon is
-        // lost, poll actual location periodically as a faster local backstop - if it confirms
-        // we're outside the venue, force the exact same exit path a real geofence EXIT would
-        // take (onGeofenceTransition), rather than a separate/parallel code path. Scoped to
-        // sessionScope like beaconLostTimer, so it's torn down automatically by stopScanning().
-        val exitPoller = GeofenceExitPoller(sessionScope) {
-            val point = locationSource.currentLocation() ?: return@GeofenceExitPoller
-            if (!containmentChecker.isWithin(point, venue)) {
-                Timber.i("GeofenceExitPoller: confirmed outside ${venue.id} via location, forcing EXIT")
-                onGeofenceTransition(GeofenceTransitionEvent.Exited(venue.id))
-            }
-        }
-
         bleScanner.scan(venue.beacon)
             .onEach { sighting ->
                 beaconLostTimer.beaconSeen()
@@ -205,16 +215,26 @@ class VenueMonitor @Inject constructor(
             .launchIn(sessionScope)
         _isScanning.value = true
 
+        // Only starts the border poller on loss to help catch exits more quickly
         sessionScope.launch {
             beaconLostTimer.lost.collect { lost ->
                 if (lost) {
                     onBeaconLost()
-                    exitPoller.start()
-                } else {
-                    exitPoller.stop()
+                    ensureBorderPollerRunning(venue)
                 }
             }
         }
+    }
+
+    private fun ensureBorderPollerRunning(venue: Venue) {
+        val poller = borderPoller ?: GeofenceBorderPoller(scope) {
+            val point = locationSource.currentLocation() ?: return@GeofenceBorderPoller
+            reconcileContainment(venue, containmentChecker.isWithin(point, venue))
+        }.also {
+            borderPoller = it
+            borderPollerVenueId = venue.id
+        }
+        poller.start()
     }
 
     private fun stopScanning() {
@@ -222,6 +242,7 @@ class VenueMonitor @Inject constructor(
         scanScope = null
         scanningVenueId = null
         _isScanning.value = false
+        // borderPoller is deliberately left untouched, so it can run the complete 5 minute window
     }
 
     private fun onSighting(sighting: BeaconSighting, smoother: RssiSmoother) {
@@ -250,5 +271,9 @@ class VenueMonitor @Inject constructor(
         VenueState.Outside -> "Outside"
         is VenueState.Inside -> "Inside ${venue.name} - waiting for beacon..."
         is VenueState.InRange -> "Inside ${venue.name} - ${proximity.displayName()}"
+    }
+
+    fun cancelForTesting() {
+        scope.cancel()
     }
 }

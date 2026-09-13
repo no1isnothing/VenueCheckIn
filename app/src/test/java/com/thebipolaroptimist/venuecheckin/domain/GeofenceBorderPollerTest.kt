@@ -9,14 +9,14 @@ import org.junit.Test
 import kotlin.time.Duration.Companion.seconds
 
 @OptIn(ExperimentalCoroutinesApi::class)
-class GeofenceExitPollerTest {
+class GeofenceBorderPollerTest {
 
     private val interval = 30.seconds
 
     @Test
     fun `onPoll is not called before the interval elapses`() = runTest {
         var pollCount = 0
-        val poller = GeofenceExitPoller(scope = this, interval = interval) { pollCount++ }
+        val poller = GeofenceBorderPoller(scope = this, interval = interval) { pollCount++ }
 
         poller.start()
         advanceTimeBy(interval.inWholeMilliseconds - 500)
@@ -28,7 +28,7 @@ class GeofenceExitPollerTest {
     @Test
     fun `onPoll is called once the interval elapses`() = runTest {
         var pollCount = 0
-        val poller = GeofenceExitPoller(scope = this, interval = interval) { pollCount++ }
+        val poller = GeofenceBorderPoller(scope = this, interval = interval) { pollCount++ }
 
         poller.start()
         advanceTimeBy(interval.inWholeMilliseconds + 100)
@@ -40,7 +40,7 @@ class GeofenceExitPollerTest {
     @Test
     fun `onPoll repeats every interval while active`() = runTest {
         var pollCount = 0
-        val poller = GeofenceExitPoller(scope = this, interval = interval) { pollCount++ }
+        val poller = GeofenceBorderPoller(scope = this, interval = interval) { pollCount++ }
 
         poller.start()
         advanceTimeBy(interval.inWholeMilliseconds + 100)
@@ -55,7 +55,7 @@ class GeofenceExitPollerTest {
     @Test
     fun `stop prevents further calls`() = runTest {
         var pollCount = 0
-        val poller = GeofenceExitPoller(scope = this, interval = interval) { pollCount++ }
+        val poller = GeofenceBorderPoller(scope = this, interval = interval) { pollCount++ }
 
         poller.start()
         advanceTimeBy(interval.inWholeMilliseconds + 100)
@@ -72,7 +72,7 @@ class GeofenceExitPollerTest {
     @Test
     fun `calling start twice without stop does not double-schedule`() = runTest {
         var pollCount = 0
-        val poller = GeofenceExitPoller(scope = this, interval = interval) { pollCount++ }
+        val poller = GeofenceBorderPoller(scope = this, interval = interval) { pollCount++ }
 
         poller.start()
         poller.start() // second call should be a no-op - doesn't reset or double the countdown
@@ -81,5 +81,45 @@ class GeofenceExitPollerTest {
         runCurrent()
 
         assertEquals(1, pollCount)
+    }
+
+    @Test
+    fun `poller stops itself once maxDuration elapses, without stop() ever being called`() = runTest {
+        var pollCount = 0
+        val poller = GeofenceBorderPoller(
+            scope = this,
+            interval = interval,
+            maxDuration = interval * 3,
+        ) { pollCount++ }
+
+        poller.start()
+        advanceTimeBy(interval.inWholeMilliseconds * 3 + 100)
+        runCurrent()
+        assertEquals(3, pollCount) // fires at 1x, 2x, 3x interval, then gives up
+
+        // No further polls even though real time keeps advancing - it isn't just paused.
+        advanceTimeBy(interval.inWholeMilliseconds * 5)
+        runCurrent()
+        assertEquals(3, pollCount)
+    }
+
+    @Test
+    fun `start after a natural give-up begins a fresh window`() = runTest {
+        var pollCount = 0
+        val poller = GeofenceBorderPoller(
+            scope = this,
+            interval = interval,
+            maxDuration = interval,
+        ) { pollCount++ }
+
+        poller.start()
+        advanceTimeBy(interval.inWholeMilliseconds + 100)
+        runCurrent()
+        assertEquals(1, pollCount) // fires once, then immediately gives up (elapsed == maxDuration)
+
+        poller.start() // must not be a no-op - the previous job already completed on its own
+        advanceTimeBy(interval.inWholeMilliseconds + 100)
+        runCurrent()
+        assertEquals(2, pollCount)
     }
 }
